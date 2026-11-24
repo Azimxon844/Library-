@@ -33,8 +33,8 @@ jobs:
                   applicationId = "uz.videokutubxona"
                   minSdk = 30
                   targetSdk = 35
-                  versionCode = 3
-                  versionName = "3.0"
+                  versionCode = 4
+                  versionName = "4.0"
               }
               buildTypes {
                   release {
@@ -70,6 +70,11 @@ jobs:
               <uses-permission
                   android:name="android.permission.READ_EXTERNAL_STORAGE"
                   android:maxSdkVersion="32" />
+
+              <queries>
+                  <package android:name="com.samsung.android.video" />
+                  <package android:name="com.sec.android.app.videoplayer" />
+              </queries>
 
               <application
                   android:allowBackup="true"
@@ -120,33 +125,50 @@ jobs:
           import androidx.activity.enableEdgeToEdge
           import androidx.activity.result.IntentSenderRequest
           import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.ExperimentalFoundationApi
           import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
           import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.combinedClickable
           import androidx.compose.foundation.isSystemInDarkTheme
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.grid.GridCells
           import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.lazy.grid.items
+          import androidx.compose.foundation.lazy.grid.itemsIndexed
           import androidx.compose.foundation.lazy.items
           import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
           import androidx.compose.material.icons.automirrored.filled.Sort
           import androidx.compose.material.icons.filled.ArrowDownward
           import androidx.compose.material.icons.filled.ArrowUpward
           import androidx.compose.material.icons.filled.Check
-          import androidx.compose.material.icons.filled.DarkMode
+          import androidx.compose.material.icons.filled.Close
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Edit
+          import androidx.compose.material.icons.filled.Info
           import androidx.compose.material.icons.filled.MoreVert
           import androidx.compose.material.icons.filled.PlayArrow
+          import androidx.compose.material.icons.filled.Search
+          import androidx.compose.material.icons.filled.Settings
+          import androidx.compose.material.icons.filled.Share
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.StarBorder
+          import androidx.compose.material.icons.filled.VisibilityOff
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.runtime.saveable.rememberSaveable
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.focus.FocusRequester
+          import androidx.compose.ui.focus.focusRequester
+          import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.graphics.asImageBitmap
           import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalContext
@@ -161,6 +183,8 @@ jobs:
 
           // ---------- Ma'lumot modellari ----------
 
+          const val FAV_KEY = "\u0001fav"
+
           data class VideoItem(
               val id: Long,
               val uri: Uri,
@@ -169,14 +193,27 @@ jobs:
               val sizeBytes: Long,
               val folder: String,
               val dateAdded: Long,
-              val dateModified: Long
+              val dateModified: Long,
+              val width: Int,
+              val height: Int,
+              val mime: String,
+              val path: String
           )
 
           data class FolderItem(val name: String, val videos: List<VideoItem>) {
+              val title: String get() = if (name == FAV_KEY) "Sevimlilar" else name
               val cover: VideoItem get() = videos.maxByOrNull { it.dateAdded }!!
               val latestAdded: Long get() = videos.maxOf { it.dateAdded }
               val totalSize: Long get() = videos.sumOf { it.sizeBytes }
           }
+
+          class VideoActions(
+              val rename: (VideoItem) -> Unit,
+              val details: (VideoItem) -> Unit,
+              val delete: (VideoItem) -> Unit,
+              val share: (VideoItem) -> Unit,
+              val toggleFav: (VideoItem) -> Unit
+          )
 
           enum class SortField(val label: String) {
               NAME("Nomi"),
@@ -196,6 +233,16 @@ jobs:
           )
 
           data class SortSpec(val field: SortField, val asc: Boolean)
+
+          fun SharedPreferences.strSet(key: String): Set<String> =
+              getStringSet(key, emptySet())?.toSet() ?: emptySet()
+
+          fun SharedPreferences.putStrSet(key: String, v: Set<String>) {
+              edit().putStringSet(key, v).apply()
+          }
+
+          fun List<VideoItem>.filterByName(q: String): List<VideoItem> =
+              if (q.isEmpty()) this else filter { it.name.contains(q, ignoreCase = true) }
 
           // ---------- Saralash ----------
 
@@ -228,7 +275,7 @@ jobs:
               return list.sortedWith(if (s.asc) c else c.reversed())
           }
 
-          fun buildFolders(list: List<VideoItem>, s: SortSpec): List<FolderItem> {
+          fun buildFolders(list: List<VideoItem>, s: SortSpec, favs: List<VideoItem>): List<FolderItem> {
               val folders = list.groupBy { it.folder }.map { (n, v) -> FolderItem(n, v) }
               val c: Comparator<FolderItem> = when (s.field) {
                   SortField.NAME -> Comparator { a, b -> naturalCompare(a.name, b.name) }
@@ -236,7 +283,8 @@ jobs:
                   SortField.COUNT -> compareBy<FolderItem> { it.videos.size }
                   else -> compareBy<FolderItem> { it.totalSize }
               }
-              return folders.sortedWith(if (s.asc) c else c.reversed())
+              val sorted = folders.sortedWith(if (s.asc) c else c.reversed())
+              return if (favs.isEmpty()) sorted else listOf(FolderItem(FAV_KEY, favs)) + sorted
           }
 
           // ---------- Activity va mavzu ----------
@@ -328,6 +376,8 @@ jobs:
 
               var tab by rememberSaveable { mutableIntStateOf(1) }
               var openFolder by rememberSaveable { mutableStateOf<String?>(null) }
+              var searching by rememberSaveable { mutableStateOf(false) }
+              var query by rememberSaveable { mutableStateOf("") }
 
               var videoSort by remember {
                   mutableStateOf(
@@ -346,15 +396,24 @@ jobs:
                   )
               }
 
+              var favIds by remember { mutableStateOf(sp.strSet("favs")) }
+              var hidden by remember { mutableStateOf(sp.strSet("hidden")) }
+              var viewMode by remember { mutableIntStateOf(sp.getInt("view", 0)) }
+              // 0 = ichki pleyer, 1 = tizim tanlovi, 2 = Samsung Video Player
               var playerMode by remember { mutableIntStateOf(sp.getInt("player", 0)) }
+
               var sortMenu by remember { mutableStateOf(false) }
-              var themeMenu by remember { mutableStateOf(false) }
+              var settingsOpen by remember { mutableStateOf(false) }
+              var hiddenOpen by remember { mutableStateOf(false) }
               var renameTarget by remember { mutableStateOf<VideoItem?>(null) }
+              var detailsTarget by remember { mutableStateOf<VideoItem?>(null) }
               var pending by remember { mutableStateOf<Pair<VideoItem, String>?>(null) }
 
-              BackHandler(enabled = openFolder != null) { openFolder = null }
+              val focus = remember { FocusRequester() }
+              LaunchedEffect(searching) { if (searching) focus.requestFocus() }
 
-              fun playAt(list: List<VideoItem>, idx: Int) = play(ctx, list, idx, playerMode == 1)
+              BackHandler(enabled = openFolder != null) { openFolder = null }
+              BackHandler(enabled = searching) { searching = false; query = "" }
 
               val writeLauncher = rememberLauncherForActivityResult(
                   ActivityResultContracts.StartIntentSenderForResult()
@@ -374,6 +433,12 @@ jobs:
                   }
               }
 
+              val deleteLauncher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.StartIntentSenderForResult()
+              ) { res ->
+                  if (res.resultCode == Activity.RESULT_OK) reload++
+              }
+
               fun startRename(v: VideoItem, newName: String) {
                   pending = v to newName
                   try {
@@ -384,6 +449,31 @@ jobs:
                       Toast.makeText(ctx, "Nomini o'zgartirib bo'lmadi", Toast.LENGTH_LONG).show()
                   }
               }
+
+              fun startDelete(v: VideoItem) {
+                  try {
+                      val pi = MediaStore.createDeleteRequest(ctx.contentResolver, listOf(v.uri))
+                      deleteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                  } catch (e: Exception) {
+                      Toast.makeText(ctx, "O'chirib bo'lmadi", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              fun toggleFav(v: VideoItem) {
+                  val k = v.id.toString()
+                  favIds = if (k in favIds) favIds - k else favIds + k
+                  sp.putStrSet("favs", favIds)
+              }
+
+              fun playAt(list: List<VideoItem>, idx: Int) = play(ctx, list, idx, playerMode)
+
+              val actions = VideoActions(
+                  rename = { renameTarget = it },
+                  details = { detailsTarget = it },
+                  delete = { startDelete(it) },
+                  share = { shareVideo(ctx, it) },
+                  toggleFav = { toggleFav(it) }
+              )
 
               val folderContext = openFolder == null && tab == 1
               val curSort = if (folderContext) folderSort else videoSort
@@ -403,11 +493,27 @@ jobs:
                       Column {
                           TopAppBar(
                               title = {
-                                  Text(
-                                      openFolder ?: "Video Kutubxona",
-                                      maxLines = 1,
-                                      overflow = TextOverflow.Ellipsis
-                                  )
+                                  if (searching) {
+                                      TextField(
+                                          value = query,
+                                          onValueChange = { query = it },
+                                          placeholder = { Text("Qidirish") },
+                                          singleLine = true,
+                                          modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                                          colors = TextFieldDefaults.colors(
+                                              focusedContainerColor = Color.Transparent,
+                                              unfocusedContainerColor = Color.Transparent,
+                                              focusedIndicatorColor = Color.Transparent,
+                                              unfocusedIndicatorColor = Color.Transparent
+                                          )
+                                      )
+                                  } else {
+                                      Text(
+                                          if (openFolder == FAV_KEY) "Sevimlilar" else openFolder ?: "Video Kutubxona",
+                                          maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis
+                                      )
+                                  }
                               },
                               navigationIcon = {
                                   if (openFolder != null) {
@@ -417,6 +523,14 @@ jobs:
                                   }
                               },
                               actions = {
+                                  IconButton(onClick = {
+                                      if (searching) { searching = false; query = "" } else searching = true
+                                  }) {
+                                      Icon(
+                                          if (searching) Icons.Filled.Close else Icons.Filled.Search,
+                                          "Qidirish"
+                                      )
+                                  }
                                   Box {
                                       IconButton(onClick = { sortMenu = true }) {
                                           Icon(Icons.AutoMirrored.Filled.Sort, "Saralash")
@@ -446,37 +560,8 @@ jobs:
                                           )
                                       }
                                   }
-                                  Box {
-                                      IconButton(onClick = { themeMenu = true }) {
-                                          Icon(Icons.Filled.DarkMode, "Mavzu")
-                                      }
-                                      DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
-                                          listOf(0 to "Ijro: ichki pleyer", 1 to "Ijro: tashqi pleyer")
-                                              .forEach { (m, label) ->
-                                                  DropdownMenuItem(
-                                                      text = { Text(label) },
-                                                      onClick = {
-                                                          playerMode = m
-                                                          sp.edit().putInt("player", m).apply()
-                                                          themeMenu = false
-                                                      },
-                                                      trailingIcon = {
-                                                          if (playerMode == m) Icon(Icons.Filled.Check, null)
-                                                      }
-                                                  )
-                                              }
-                                          HorizontalDivider()
-                                          listOf(0 to "Tizim bo'yicha", 1 to "Yorug' rejim", 2 to "Tungi rejim")
-                                              .forEach { (m, label) ->
-                                                  DropdownMenuItem(
-                                                      text = { Text(label) },
-                                                      onClick = { onTheme(m); themeMenu = false },
-                                                      trailingIcon = {
-                                                          if (themeMode == m) Icon(Icons.Filled.Check, null)
-                                                      }
-                                                  )
-                                              }
-                                      }
+                                  IconButton(onClick = { settingsOpen = true }) {
+                                      Icon(Icons.Filled.Settings, "Sozlamalar")
                                   }
                               }
                           )
@@ -491,31 +576,60 @@ jobs:
               ) { pad ->
                   Box(Modifier.padding(pad).fillMaxSize()) {
                       val all = videos
+                      val vis = remember(all, hidden) { all?.filter { it.folder !in hidden } }
+                      val q = query.trim()
+                      val emptyText = if (q.isNotEmpty()) "Hech narsa topilmadi" else "Video yo'q"
                       when {
-                          all == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                          vis == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                               CircularProgressIndicator()
                           }
-                          all.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                          vis.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                               Text("Video topilmadi")
                           }
                           openFolder != null -> {
-                              val items = remember(all, openFolder, videoSort) {
-                                  sortVideos(all.filter { it.folder == openFolder }, videoSort)
+                              val of = openFolder!!
+                              val items = remember(vis, of, videoSort, q, favIds) {
+                                  val base = if (of == FAV_KEY) vis.filter { it.id.toString() in favIds }
+                                  else vis.filter { it.folder == of }
+                                  sortVideos(base.filterByName(q), videoSort)
                               }
-                              VideoListView(items, false, { l, i -> playAt(l, i) }) { renameTarget = it }
+                              VideoListView(items, false, viewMode == 1, favIds, actions, emptyText) { l, i ->
+                                  playAt(l, i)
+                              }
                           }
                           tab == 0 -> {
-                              val items = remember(all, videoSort) { sortVideos(all, videoSort) }
-                              VideoListView(items, true, { l, i -> playAt(l, i) }) { renameTarget = it }
+                              val items = remember(vis, videoSort, q) {
+                                  sortVideos(vis.filterByName(q), videoSort)
+                              }
+                              VideoListView(items, true, viewMode == 1, favIds, actions, emptyText) { l, i ->
+                                  playAt(l, i)
+                              }
                           }
                           else -> {
-                              val folders = remember(all, folderSort) { buildFolders(all, folderSort) }
-                              FolderGrid(folders) { openFolder = it }
+                              val folders = remember(vis, folderSort, favIds, q) {
+                                  val favs = vis.filter { it.id.toString() in favIds }
+                                  buildFolders(vis, folderSort, favs)
+                                      .filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) }
+                              }
+                              FolderGrid(
+                                  folders,
+                                  onOpen = { openFolder = it },
+                                  onHide = { name ->
+                                      hidden = hidden + name
+                                      sp.putStrSet("hidden", hidden)
+                                      Toast.makeText(
+                                          ctx,
+                                          "Yashirildi. Qaytarish: Sozlamalar > Yashirin papkalar",
+                                          Toast.LENGTH_LONG
+                                      ).show()
+                                  }
+                              )
                           }
                       }
                   }
               }
 
+              // ----- Nomini o'zgartirish -----
               renameTarget?.let { v ->
                   val dot = v.name.lastIndexOf('.')
                   val ext = if (dot > 0) v.name.substring(dot) else ""
@@ -545,12 +659,148 @@ jobs:
                       dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Bekor qilish") } }
                   )
               }
+
+              // ----- Ma'lumot -----
+              detailsTarget?.let { v ->
+                  val fmt = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.US)
+                  AlertDialog(
+                      onDismissRequest = { detailsTarget = null },
+                      title = { Text("Ma'lumot") },
+                      text = {
+                          Column(Modifier.verticalScroll(rememberScrollState())) {
+                              InfoLine("Nomi", v.name)
+                              InfoLine("Joylashuvi", if (v.path.isNotBlank()) v.path else v.folder)
+                              InfoLine(
+                                  "Hajmi",
+                                  formatMb(v.sizeBytes) + " (" + String.format(Locale.US, "%,d", v.sizeBytes) + " bayt)"
+                              )
+                              InfoLine("Davomiyligi", formatDuration(v.durationMs))
+                              if (v.width > 0 && v.height > 0) InfoLine("O'lchami", "${v.width} × ${v.height}")
+                              if (v.mime.isNotBlank()) InfoLine("Format", v.mime)
+                              InfoLine("Qo'shilgan", fmt.format(Date(v.dateAdded * 1000)))
+                              InfoLine("O'zgartirilgan", fmt.format(Date(v.dateModified * 1000)))
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { detailsTarget = null }) { Text("Yopish") } }
+                  )
+              }
+
+              // ----- Sozlamalar -----
+              if (settingsOpen) {
+                  AlertDialog(
+                      onDismissRequest = { settingsOpen = false },
+                      title = { Text("Sozlamalar") },
+                      text = {
+                          Column(Modifier.verticalScroll(rememberScrollState())) {
+                              SectionTitle("Mavzu")
+                              RadioRow("Tizim bo'yicha", themeMode == 0) { onTheme(0) }
+                              RadioRow("Yorug' rejim", themeMode == 1) { onTheme(1) }
+                              RadioRow("Tungi rejim", themeMode == 2) { onTheme(2) }
+
+                              SectionTitle("Videolar ko'rinishi")
+                              RadioRow("Ro'yxat", viewMode == 0) {
+                                  viewMode = 0; sp.edit().putInt("view", 0).apply()
+                              }
+                              RadioRow("Katak (grid)", viewMode == 1) {
+                                  viewMode = 1; sp.edit().putInt("view", 1).apply()
+                              }
+
+                              SectionTitle("Pleyer")
+                              RadioRow("Ichki pleyer (keyingi/oldingi shu ro'yxat ichida)", playerMode == 0) {
+                                  playerMode = 0; sp.edit().putInt("player", 0).apply()
+                              }
+                              RadioRow("Tizim tanlovi (\"Doim\" ni bosib doimiy qilish mumkin)", playerMode == 1) {
+                                  playerMode = 1; sp.edit().putInt("player", 1).apply()
+                              }
+                              RadioRow("Samsung Video Player", playerMode == 2) {
+                                  playerMode = 2; sp.edit().putInt("player", 2).apply()
+                              }
+
+                              SectionTitle("Papkalar")
+                              TextButton(onClick = { settingsOpen = false; hiddenOpen = true }) {
+                                  Text("Yashirin papkalar (${hidden.size})")
+                              }
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { settingsOpen = false }) { Text("Yopish") } }
+                  )
+              }
+
+              // ----- Yashirin papkalar -----
+              if (hiddenOpen) {
+                  AlertDialog(
+                      onDismissRequest = { hiddenOpen = false },
+                      title = { Text("Yashirin papkalar") },
+                      text = {
+                          Column(Modifier.verticalScroll(rememberScrollState())) {
+                              if (hidden.isEmpty()) Text("Yashirin papka yo'q.")
+                              hidden.sorted().forEach { name ->
+                                  Row(
+                                      Modifier.fillMaxWidth(),
+                                      verticalAlignment = Alignment.CenterVertically
+                                  ) {
+                                      Text(
+                                          name,
+                                          Modifier.weight(1f),
+                                          maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis
+                                      )
+                                      TextButton(onClick = {
+                                          hidden = hidden - name
+                                          sp.putStrSet("hidden", hidden)
+                                      }) { Text("Ko'rsatish") }
+                                  }
+                              }
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { hiddenOpen = false }) { Text("Yopish") } }
+                  )
+              }
+          }
+
+          @Composable
+          fun InfoLine(label: String, value: String) {
+              Column(Modifier.padding(bottom = 10.dp)) {
+                  Text(
+                      label,
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+                  Text(value, style = MaterialTheme.typography.bodyMedium)
+              }
+          }
+
+          @Composable
+          fun SectionTitle(text: String) {
+              Text(
+                  text,
+                  style = MaterialTheme.typography.labelLarge,
+                  color = MaterialTheme.colorScheme.primary,
+                  modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+              )
+          }
+
+          @Composable
+          fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {
+              Row(
+                  Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 6.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  RadioButton(selected = selected, onClick = null)
+                  Spacer(Modifier.width(10.dp))
+                  Text(label, style = MaterialTheme.typography.bodyMedium)
+              }
           }
 
           // ---------- Papkalar (Samsung Video uslubida) ----------
 
+          @OptIn(ExperimentalFoundationApi::class)
           @Composable
-          fun FolderGrid(folders: List<FolderItem>, onOpen: (String) -> Unit) {
+          fun FolderGrid(folders: List<FolderItem>, onOpen: (String) -> Unit, onHide: (String) -> Unit) {
+              if (folders.isEmpty()) {
+                  Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Papka topilmadi") }
+                  return
+              }
               LazyVerticalGrid(
                   columns = GridCells.Fixed(2),
                   modifier = Modifier.fillMaxSize(),
@@ -559,55 +809,138 @@ jobs:
                   verticalArrangement = Arrangement.spacedBy(16.dp)
               ) {
                   items(folders, key = { it.name }) { f ->
-                      Column(Modifier.clickable { onOpen(f.name) }) {
-                          Thumb(
-                              v = f.cover,
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .aspectRatio(1f)
-                                  .clip(RoundedCornerShape(4.dp)),
-                              size = Size(400, 400)
-                          )
-                          Spacer(Modifier.height(6.dp))
-                          Text(
-                              f.name,
-                              style = MaterialTheme.typography.bodyLarge,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
-                          )
-                          Text(
-                              "${f.videos.size}",
-                              style = MaterialTheme.typography.bodySmall,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant
-                          )
+                      var menu by remember { mutableStateOf(false) }
+                      Box {
+                          Column(
+                              Modifier.combinedClickable(
+                                  onClick = { onOpen(f.name) },
+                                  onLongClick = { if (f.name != FAV_KEY) menu = true }
+                              )
+                          ) {
+                              Box {
+                                  Thumb(
+                                      v = f.cover,
+                                      modifier = Modifier
+                                          .fillMaxWidth()
+                                          .aspectRatio(1f)
+                                          .clip(RoundedCornerShape(4.dp)),
+                                      size = Size(400, 400)
+                                  )
+                                  if (f.name == FAV_KEY) {
+                                      Icon(
+                                          Icons.Filled.Star, null,
+                                          tint = Color(0xFFFFC107),
+                                          modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+                                      )
+                                  }
+                              }
+                              Spacer(Modifier.height(6.dp))
+                              Text(
+                                  f.title,
+                                  style = MaterialTheme.typography.bodyLarge,
+                                  maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis
+                              )
+                              Text(
+                                  "${f.videos.size}",
+                                  style = MaterialTheme.typography.bodySmall,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
+                          }
+                          DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                              DropdownMenuItem(
+                                  text = { Text("Yashirish") },
+                                  leadingIcon = { Icon(Icons.Filled.VisibilityOff, null) },
+                                  onClick = { menu = false; onHide(f.name) }
+                              )
+                          }
                       }
                   }
               }
           }
 
-          // ---------- Video ro'yxati ----------
+          // ---------- Video ro'yxati / katagi ----------
 
           @Composable
           fun VideoListView(
               items: List<VideoItem>,
               showFolder: Boolean,
-              onPlay: (List<VideoItem>, Int) -> Unit,
-              onRename: (VideoItem) -> Unit
+              grid: Boolean,
+              favIds: Set<String>,
+              actions: VideoActions,
+              emptyText: String,
+              onPlay: (List<VideoItem>, Int) -> Unit
           ) {
               if (items.isEmpty()) {
-                  Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Video yo'q") }
+                  Box(Modifier.fillMaxSize(), Alignment.Center) { Text(emptyText) }
                   return
               }
-              LazyColumn(Modifier.fillMaxSize()) {
-                  itemsIndexed(items, key = { _, v -> v.id }) { idx, v ->
-                      VideoRow(v, showFolder, { onPlay(items, idx) }, onRename)
+              if (grid) {
+                  LazyVerticalGrid(
+                      columns = GridCells.Fixed(2),
+                      modifier = Modifier.fillMaxSize(),
+                      contentPadding = PaddingValues(12.dp),
+                      horizontalArrangement = Arrangement.spacedBy(12.dp),
+                      verticalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      itemsIndexed(items, key = { _, v -> v.id }) { idx, v ->
+                          VideoTile(v, showFolder, v.id.toString() in favIds, actions) { onPlay(items, idx) }
+                      }
+                  }
+              } else {
+                  LazyColumn(Modifier.fillMaxSize()) {
+                      itemsIndexed(items, key = { _, v -> v.id }) { idx, v ->
+                          VideoRow(v, showFolder, v.id.toString() in favIds, actions) { onPlay(items, idx) }
+                      }
                   }
               }
           }
 
           @Composable
-          fun VideoRow(v: VideoItem, showFolder: Boolean, onClick: () -> Unit, onRename: (VideoItem) -> Unit) {
+          fun VideoMenu(v: VideoItem, isFav: Boolean, actions: VideoActions) {
               var menu by remember { mutableStateOf(false) }
+              Box {
+                  IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Amallar") }
+                  DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                      DropdownMenuItem(
+                          text = { Text(if (isFav) "Sevimlilardan olib tashlash" else "Sevimlilarga qo'shish") },
+                          leadingIcon = {
+                              Icon(if (isFav) Icons.Filled.Star else Icons.Filled.StarBorder, null)
+                          },
+                          onClick = { menu = false; actions.toggleFav(v) }
+                      )
+                      DropdownMenuItem(
+                          text = { Text("Nomini o'zgartirish") },
+                          leadingIcon = { Icon(Icons.Filled.Edit, null) },
+                          onClick = { menu = false; actions.rename(v) }
+                      )
+                      DropdownMenuItem(
+                          text = { Text("Ulashish") },
+                          leadingIcon = { Icon(Icons.Filled.Share, null) },
+                          onClick = { menu = false; actions.share(v) }
+                      )
+                      DropdownMenuItem(
+                          text = { Text("Ma'lumot") },
+                          leadingIcon = { Icon(Icons.Filled.Info, null) },
+                          onClick = { menu = false; actions.details(v) }
+                      )
+                      DropdownMenuItem(
+                          text = { Text("O'chirish") },
+                          leadingIcon = { Icon(Icons.Filled.Delete, null) },
+                          onClick = { menu = false; actions.delete(v) }
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          fun VideoRow(
+              v: VideoItem,
+              showFolder: Boolean,
+              isFav: Boolean,
+              actions: VideoActions,
+              onClick: () -> Unit
+          ) {
               val date = remember(v.dateAdded) {
                   SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(v.dateAdded * 1000))
               }
@@ -627,12 +960,23 @@ jobs:
                   )
                   Spacer(Modifier.width(12.dp))
                   Column(Modifier.weight(1f)) {
-                      Text(
-                          v.name,
-                          style = MaterialTheme.typography.bodyLarge,
-                          maxLines = 2,
-                          overflow = TextOverflow.Ellipsis
-                      )
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Text(
+                              v.name,
+                              Modifier.weight(1f, fill = false),
+                              style = MaterialTheme.typography.bodyLarge,
+                              maxLines = 2,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                          if (isFav) {
+                              Spacer(Modifier.width(4.dp))
+                              Icon(
+                                  Icons.Filled.Star, null,
+                                  tint = Color(0xFFFFC107),
+                                  modifier = Modifier.size(16.dp)
+                              )
+                          }
+                      }
                       Spacer(Modifier.height(4.dp))
                       Text(
                           "${formatDuration(v.durationMs)}  •  ${formatMb(v.sizeBytes)}",
@@ -647,14 +991,63 @@ jobs:
                           overflow = TextOverflow.Ellipsis
                       )
                   }
+                  VideoMenu(v, isFav, actions)
+              }
+          }
+
+          @Composable
+          fun VideoTile(
+              v: VideoItem,
+              showFolder: Boolean,
+              isFav: Boolean,
+              actions: VideoActions,
+              onClick: () -> Unit
+          ) {
+              Column(Modifier.clickable { onClick() }) {
                   Box {
-                      IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Amallar") }
-                      DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                          DropdownMenuItem(
-                              text = { Text("Nomini o'zgartirish") },
-                              onClick = { menu = false; onRename(v) }
+                      Thumb(
+                          v,
+                          Modifier
+                              .fillMaxWidth()
+                              .aspectRatio(16f / 9f)
+                              .clip(RoundedCornerShape(8.dp)),
+                          Size(480, 270)
+                      )
+                      Text(
+                          formatDuration(v.durationMs),
+                          color = Color.White,
+                          style = MaterialTheme.typography.labelSmall,
+                          modifier = Modifier
+                              .align(Alignment.BottomEnd)
+                              .padding(6.dp)
+                              .background(Color(0x99000000), RoundedCornerShape(4.dp))
+                              .padding(horizontal = 4.dp, vertical = 1.dp)
+                      )
+                      if (isFav) {
+                          Icon(
+                              Icons.Filled.Star, null,
+                              tint = Color(0xFFFFC107),
+                              modifier = Modifier.align(Alignment.TopStart).padding(6.dp).size(18.dp)
                           )
                       }
+                  }
+                  Row(verticalAlignment = Alignment.Top) {
+                      Column(Modifier.weight(1f).padding(top = 4.dp)) {
+                          Text(
+                              v.name,
+                              style = MaterialTheme.typography.bodyMedium,
+                              maxLines = 2,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                          Text(
+                              formatMb(v.sizeBytes) + (if (showFolder) "  •  ${v.folder}" else ""),
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                      }
+                      VideoMenu(v, isFav, actions)
                   }
               }
           }
@@ -711,7 +1104,11 @@ jobs:
                   MediaStore.Video.Media.SIZE,
                   MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
                   MediaStore.Video.Media.DATE_ADDED,
-                  MediaStore.Video.Media.DATE_MODIFIED
+                  MediaStore.Video.Media.DATE_MODIFIED,
+                  MediaStore.Video.Media.WIDTH,
+                  MediaStore.Video.Media.HEIGHT,
+                  MediaStore.Video.Media.MIME_TYPE,
+                  MediaStore.Video.Media.RELATIVE_PATH
               )
               ctx.contentResolver.query(collection, proj, null, null, null)?.use { c ->
                   val iId = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
@@ -721,6 +1118,10 @@ jobs:
                   val iBucket = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
                   val iAdded = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
                   val iMod = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED)
+                  val iW = c.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
+                  val iH = c.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
+                  val iMime = c.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
+                  val iPath = c.getColumnIndexOrThrow(MediaStore.Video.Media.RELATIVE_PATH)
                   while (c.moveToNext()) {
                       val id = c.getLong(iId)
                       out += VideoItem(
@@ -731,7 +1132,11 @@ jobs:
                           sizeBytes = c.getLong(iSize),
                           folder = c.getString(iBucket) ?: "Boshqa",
                           dateAdded = c.getLong(iAdded),
-                          dateModified = c.getLong(iMod)
+                          dateModified = c.getLong(iMod),
+                          width = c.getInt(iW),
+                          height = c.getInt(iH),
+                          mime = c.getString(iMime) ?: "",
+                          path = c.getString(iPath) ?: ""
                       )
                   }
               }
@@ -750,40 +1155,82 @@ jobs:
           fun formatMb(bytes: Long): String =
               String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-          fun play(ctx: Context, items: List<VideoItem>, index: Int, external: Boolean) {
-              if (external) {
-                  val v = items[index]
-                  val i = Intent(Intent.ACTION_VIEW).apply {
-                      setDataAndType(v.uri, "video/*")
-                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                  }
-                  try {
-                      ctx.startActivity(i)
-                  } catch (e: Exception) {
-                      Toast.makeText(ctx, "Pleyer topilmadi", Toast.LENGTH_LONG).show()
-                  }
-              } else {
+          // ---------- Ijro va ulashish ----------
+
+          private val SAMSUNG_PLAYERS = listOf("com.samsung.android.video", "com.sec.android.app.videoplayer")
+
+          fun play(ctx: Context, items: List<VideoItem>, index: Int, mode: Int) {
+              if (mode == 0) {
                   PlayQueue.uris = items.map { it.uri }
                   PlayQueue.names = items.map { it.name }
+                  PlayQueue.ids = items.map { it.id }
+                  PlayQueue.durations = items.map { it.durationMs }
                   ctx.startActivity(Intent(ctx, PlayerActivity::class.java).putExtra("start", index))
+              } else {
+                  playExternal(ctx, items[index], mode == 2)
               }
+          }
+
+          fun playExternal(ctx: Context, v: VideoItem, samsung: Boolean) {
+              val i = Intent(Intent.ACTION_VIEW).apply {
+                  setDataAndType(v.uri, "video/*")
+                  addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+              }
+              if (samsung) {
+                  val pm = ctx.packageManager
+                  val pkg = SAMSUNG_PLAYERS.firstOrNull {
+                      try {
+                          pm.getPackageInfo(it, 0)
+                          true
+                      } catch (e: Exception) {
+                          false
+                      }
+                  }
+                  if (pkg != null) {
+                      i.setPackage(pkg)
+                  } else {
+                      Toast.makeText(ctx, "Samsung Video Player topilmadi", Toast.LENGTH_LONG).show()
+                  }
+              }
+              try {
+                  ctx.startActivity(i)
+              } catch (e: Exception) {
+                  Toast.makeText(ctx, "Pleyer topilmadi", Toast.LENGTH_LONG).show()
+              }
+          }
+
+          fun shareVideo(ctx: Context, v: VideoItem) {
+              val i = Intent(Intent.ACTION_SEND).apply {
+                  type = "video/*"
+                  putExtra(Intent.EXTRA_STREAM, v.uri)
+                  addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+              }
+              ctx.startActivity(Intent.createChooser(i, "Ulashish"))
           }
           EOF_FILE
           mkdir -p $(dirname 'app/src/main/java/uz/videokutubxona/PlayerActivity.kt')
           cat > 'app/src/main/java/uz/videokutubxona/PlayerActivity.kt' <<'EOF_FILE'
           package uz.videokutubxona
 
+          import android.content.SharedPreferences
           import android.net.Uri
           import android.os.Bundle
+          import android.provider.OpenableColumns
           import android.view.View
           import android.view.WindowManager
           import androidx.activity.ComponentActivity
           import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.background
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.displayCutoutPadding
           import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
           import androidx.compose.foundation.layout.padding
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Subtitles
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
           import androidx.compose.material3.Text
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableStateOf
@@ -797,6 +1244,7 @@ jobs:
           import androidx.core.view.WindowCompat
           import androidx.core.view.WindowInsetsCompat
           import androidx.core.view.WindowInsetsControllerCompat
+          import androidx.media3.common.C
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MediaMetadata
           import androidx.media3.common.Player
@@ -807,15 +1255,24 @@ jobs:
           object PlayQueue {
               var uris: List<Uri> = emptyList()
               var names: List<String> = emptyList()
+              var ids: List<Long> = emptyList()
+              var durations: List<Long> = emptyList()
           }
 
           class PlayerActivity : ComponentActivity() {
               private var exoPlayer: ExoPlayer? = null
               private var title by mutableStateOf("")
-              private var showTitle by mutableStateOf(true)
+              private var showControls by mutableStateOf(true)
+              private lateinit var sp: SharedPreferences
+
+              private val subtitlePicker =
+                  registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                      if (uri != null) addSubtitle(uri)
+                  }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  sp = getSharedPreferences("prefs", MODE_PRIVATE)
 
                   val uris = PlayQueue.uris
                   val names = PlayQueue.names
@@ -839,10 +1296,22 @@ jobs:
                           .setMediaMetadata(MediaMetadata.Builder().setTitle(names.getOrElse(i) { "" }).build())
                           .build()
                   }
-                  exo.setMediaItems(items, start, 0L)
+                  val startId = PlayQueue.ids.getOrNull(start)
+                  val saved = if (startId != null) sp.getLong("pos_$startId", 0L) else 0L
+                  exo.setMediaItems(items, start, saved)
                   exo.addListener(object : Player.Listener {
                       override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                           title = mediaItem?.mediaMetadata?.title?.toString() ?: ""
+                      }
+
+                      override fun onPositionDiscontinuity(
+                          oldPosition: Player.PositionInfo,
+                          newPosition: Player.PositionInfo,
+                          reason: Int
+                      ) {
+                          if (oldPosition.mediaItemIndex != newPosition.mediaItemIndex) {
+                              store(oldPosition.mediaItemIndex, oldPosition.positionMs)
+                          }
                       }
                   })
                   title = names.getOrElse(start) { "" }
@@ -859,13 +1328,13 @@ jobs:
                                       player = exo
                                       setControllerVisibilityListener(
                                           PlayerView.ControllerVisibilityListener { v ->
-                                              showTitle = v == View.VISIBLE
+                                              showControls = v == View.VISIBLE
                                           }
                                       )
                                   }
                               }
                           )
-                          if (showTitle) {
+                          if (showControls) {
                               Text(
                                   title,
                                   color = Color.White,
@@ -874,16 +1343,70 @@ jobs:
                                   modifier = Modifier
                                       .align(Alignment.TopStart)
                                       .displayCutoutPadding()
+                                      .fillMaxWidth(0.75f)
                                       .padding(16.dp)
                               )
+                              IconButton(
+                                  onClick = { subtitlePicker.launch(arrayOf("*/*")) },
+                                  modifier = Modifier
+                                      .align(Alignment.TopEnd)
+                                      .displayCutoutPadding()
+                                      .padding(8.dp)
+                              ) {
+                                  Icon(Icons.Filled.Subtitles, "Subtitr qo'shish", tint = Color.White)
+                              }
                           }
                       }
                   }
               }
 
+              private fun store(index: Int, posMs: Long) {
+                  val id = PlayQueue.ids.getOrNull(index) ?: return
+                  val dur = PlayQueue.durations.getOrElse(index) { 0L }
+                  val e = sp.edit()
+                  if (dur > 0 && posMs > 5_000 && posMs < dur - 10_000) e.putLong("pos_$id", posMs)
+                  else e.remove("pos_$id")
+                  e.apply()
+              }
+
+              private fun displayName(uri: Uri): String {
+                  return try {
+                      contentResolver.query(uri, null, null, null, null)?.use { c ->
+                          val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                          if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+                      } ?: ""
+                  } catch (e: Exception) {
+                      ""
+                  }
+              }
+
+              private fun addSubtitle(uri: Uri) {
+                  val exo = exoPlayer ?: return
+                  val cur = exo.currentMediaItem ?: return
+                  val idx = exo.currentMediaItemIndex
+                  val pos = exo.currentPosition
+                  val n = displayName(uri).lowercase()
+                  val mime = when {
+                      n.endsWith(".vtt") -> "text/vtt"
+                      n.endsWith(".ass") || n.endsWith(".ssa") -> "text/x-ssa"
+                      else -> "application/x-subrip"
+                  }
+                  val sub = MediaItem.SubtitleConfiguration.Builder(uri)
+                      .setMimeType(mime)
+                      .setLanguage("und")
+                      .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                      .build()
+                  exo.replaceMediaItem(idx, cur.buildUpon().setSubtitleConfigurations(listOf(sub)).build())
+                  exo.seekTo(idx, pos)
+                  exo.play()
+              }
+
               override fun onStop() {
                   super.onStop()
-                  exoPlayer?.pause()
+                  exoPlayer?.let {
+                      store(it.currentMediaItemIndex, it.currentPosition)
+                      it.pause()
+                  }
               }
 
               override fun onDestroy() {
