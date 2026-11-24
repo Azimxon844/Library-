@@ -33,8 +33,8 @@ jobs:
                   applicationId = "uz.videokutubxona"
                   minSdk = 30
                   targetSdk = 35
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 3
+                  versionName = "3.0"
               }
               buildTypes {
                   release {
@@ -57,6 +57,8 @@ jobs:
               implementation("androidx.activity:activity-compose:1.9.3")
               implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
               implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.media3:media3-exoplayer:1.4.1")
+              implementation("androidx.media3:media3-ui:1.4.1")
           }
           EOF_FILE
           mkdir -p $(dirname 'app/src/main/AndroidManifest.xml')
@@ -82,6 +84,11 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <activity
+                      android:name=".PlayerActivity"
+                      android:exported="false"
+                      android:screenOrientation="fullSensor"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode" />
               </application>
           </manifest>
           EOF_FILE
@@ -123,6 +130,7 @@ jobs:
           import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.lazy.grid.items
           import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -338,12 +346,15 @@ jobs:
                   )
               }
 
+              var playerMode by remember { mutableIntStateOf(sp.getInt("player", 0)) }
               var sortMenu by remember { mutableStateOf(false) }
               var themeMenu by remember { mutableStateOf(false) }
               var renameTarget by remember { mutableStateOf<VideoItem?>(null) }
               var pending by remember { mutableStateOf<Pair<VideoItem, String>?>(null) }
 
               BackHandler(enabled = openFolder != null) { openFolder = null }
+
+              fun playAt(list: List<VideoItem>, idx: Int) = play(ctx, list, idx, playerMode == 1)
 
               val writeLauncher = rememberLauncherForActivityResult(
                   ActivityResultContracts.StartIntentSenderForResult()
@@ -440,6 +451,21 @@ jobs:
                                           Icon(Icons.Filled.DarkMode, "Mavzu")
                                       }
                                       DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
+                                          listOf(0 to "Ijro: ichki pleyer", 1 to "Ijro: tashqi pleyer")
+                                              .forEach { (m, label) ->
+                                                  DropdownMenuItem(
+                                                      text = { Text(label) },
+                                                      onClick = {
+                                                          playerMode = m
+                                                          sp.edit().putInt("player", m).apply()
+                                                          themeMenu = false
+                                                      },
+                                                      trailingIcon = {
+                                                          if (playerMode == m) Icon(Icons.Filled.Check, null)
+                                                      }
+                                                  )
+                                              }
+                                          HorizontalDivider()
                                           listOf(0 to "Tizim bo'yicha", 1 to "Yorug' rejim", 2 to "Tungi rejim")
                                               .forEach { (m, label) ->
                                                   DropdownMenuItem(
@@ -476,11 +502,11 @@ jobs:
                               val items = remember(all, openFolder, videoSort) {
                                   sortVideos(all.filter { it.folder == openFolder }, videoSort)
                               }
-                              VideoListView(items, showFolder = false) { renameTarget = it }
+                              VideoListView(items, false, { l, i -> playAt(l, i) }) { renameTarget = it }
                           }
                           tab == 0 -> {
                               val items = remember(all, videoSort) { sortVideos(all, videoSort) }
-                              VideoListView(items, showFolder = true) { renameTarget = it }
+                              VideoListView(items, true, { l, i -> playAt(l, i) }) { renameTarget = it }
                           }
                           else -> {
                               val folders = remember(all, folderSort) { buildFolders(all, folderSort) }
@@ -562,19 +588,25 @@ jobs:
           // ---------- Video ro'yxati ----------
 
           @Composable
-          fun VideoListView(items: List<VideoItem>, showFolder: Boolean, onRename: (VideoItem) -> Unit) {
+          fun VideoListView(
+              items: List<VideoItem>,
+              showFolder: Boolean,
+              onPlay: (List<VideoItem>, Int) -> Unit,
+              onRename: (VideoItem) -> Unit
+          ) {
               if (items.isEmpty()) {
                   Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Video yo'q") }
                   return
               }
               LazyColumn(Modifier.fillMaxSize()) {
-                  items(items, key = { it.id }) { VideoRow(it, showFolder, onRename) }
+                  itemsIndexed(items, key = { _, v -> v.id }) { idx, v ->
+                      VideoRow(v, showFolder, { onPlay(items, idx) }, onRename)
+                  }
               }
           }
 
           @Composable
-          fun VideoRow(v: VideoItem, showFolder: Boolean, onRename: (VideoItem) -> Unit) {
-              val ctx = LocalContext.current
+          fun VideoRow(v: VideoItem, showFolder: Boolean, onClick: () -> Unit, onRename: (VideoItem) -> Unit) {
               var menu by remember { mutableStateOf(false) }
               val date = remember(v.dateAdded) {
                   SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(v.dateAdded * 1000))
@@ -582,7 +614,7 @@ jobs:
               Row(
                   Modifier
                       .fillMaxWidth()
-                      .clickable { play(ctx, v) }
+                      .clickable { onClick() }
                       .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
@@ -718,12 +750,147 @@ jobs:
           fun formatMb(bytes: Long): String =
               String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-          fun play(ctx: Context, v: VideoItem) {
-              val i = Intent(Intent.ACTION_VIEW).apply {
-                  setDataAndType(v.uri, "video/*")
-                  addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          fun play(ctx: Context, items: List<VideoItem>, index: Int, external: Boolean) {
+              if (external) {
+                  val v = items[index]
+                  val i = Intent(Intent.ACTION_VIEW).apply {
+                      setDataAndType(v.uri, "video/*")
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  try {
+                      ctx.startActivity(i)
+                  } catch (e: Exception) {
+                      Toast.makeText(ctx, "Pleyer topilmadi", Toast.LENGTH_LONG).show()
+                  }
+              } else {
+                  PlayQueue.uris = items.map { it.uri }
+                  PlayQueue.names = items.map { it.name }
+                  ctx.startActivity(Intent(ctx, PlayerActivity::class.java).putExtra("start", index))
               }
-              ctx.startActivity(Intent.createChooser(i, "Ijro etish"))
+          }
+          EOF_FILE
+          mkdir -p $(dirname 'app/src/main/java/uz/videokutubxona/PlayerActivity.kt')
+          cat > 'app/src/main/java/uz/videokutubxona/PlayerActivity.kt' <<'EOF_FILE'
+          package uz.videokutubxona
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.View
+          import android.view.WindowManager
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.displayCutoutPadding
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MediaMetadata
+          import androidx.media3.common.Player
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.ui.PlayerView
+
+          /** Hozir ko'rinib turgan ro'yxat (papka yoki barcha videolar) shu yerga qo'yiladi. */
+          object PlayQueue {
+              var uris: List<Uri> = emptyList()
+              var names: List<String> = emptyList()
+          }
+
+          class PlayerActivity : ComponentActivity() {
+              private var exoPlayer: ExoPlayer? = null
+              private var title by mutableStateOf("")
+              private var showTitle by mutableStateOf(true)
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val uris = PlayQueue.uris
+                  val names = PlayQueue.names
+                  if (uris.isEmpty()) {
+                      finish()
+                      return
+                  }
+                  val start = intent.getIntExtra("start", 0).coerceIn(0, uris.size - 1)
+
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  WindowCompat.setDecorFitsSystemWindows(window, false)
+                  WindowInsetsControllerCompat(window, window.decorView).apply {
+                      systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                      hide(WindowInsetsCompat.Type.systemBars())
+                  }
+
+                  val exo = ExoPlayer.Builder(this).build()
+                  val items = uris.mapIndexed { i, u ->
+                      MediaItem.Builder()
+                          .setUri(u)
+                          .setMediaMetadata(MediaMetadata.Builder().setTitle(names.getOrElse(i) { "" }).build())
+                          .build()
+                  }
+                  exo.setMediaItems(items, start, 0L)
+                  exo.addListener(object : Player.Listener {
+                      override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                          title = mediaItem?.mediaMetadata?.title?.toString() ?: ""
+                      }
+                  })
+                  title = names.getOrElse(start) { "" }
+                  exo.prepare()
+                  exo.playWhenReady = true
+                  exoPlayer = exo
+
+                  setContent {
+                      Box(Modifier.fillMaxSize().background(Color.Black)) {
+                          AndroidView(
+                              modifier = Modifier.fillMaxSize(),
+                              factory = { ctx ->
+                                  PlayerView(ctx).apply {
+                                      player = exo
+                                      setControllerVisibilityListener(
+                                          PlayerView.ControllerVisibilityListener { v ->
+                                              showTitle = v == View.VISIBLE
+                                          }
+                                      )
+                                  }
+                              }
+                          )
+                          if (showTitle) {
+                              Text(
+                                  title,
+                                  color = Color.White,
+                                  maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis,
+                                  modifier = Modifier
+                                      .align(Alignment.TopStart)
+                                      .displayCutoutPadding()
+                                      .padding(16.dp)
+                              )
+                          }
+                      }
+                  }
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  exoPlayer?.pause()
+              }
+
+              override fun onDestroy() {
+                  exoPlayer?.release()
+                  exoPlayer = null
+                  super.onDestroy()
+              }
           }
           EOF_FILE
           mkdir -p $(dirname 'app/src/main/res/values-night/themes.xml')
