@@ -31,10 +31,10 @@ jobs:
 
               defaultConfig {
                   applicationId = "uz.videokutubxona"
-                  minSdk = 29
+                  minSdk = 30
                   targetSdk = 35
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               buildTypes {
                   release {
@@ -73,7 +73,7 @@ jobs:
                   android:allowBackup="true"
                   android:label="Video Kutubxona"
                   android:supportsRtl="true"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:theme="@style/Theme.VideoKutubxona">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
@@ -90,28 +90,47 @@ jobs:
           package uz.videokutubxona
 
           import android.Manifest
+          import android.app.Activity
           import android.content.ContentUris
+          import android.content.ContentValues
           import android.content.Context
           import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
           import android.graphics.Bitmap
+          import android.net.Uri
           import android.os.Build
+          import android.os.Bundle
           import android.provider.MediaStore
+          import android.util.LruCache
           import android.util.Size
+          import android.widget.Toast
           import androidx.activity.ComponentActivity
+          import androidx.activity.SystemBarStyle
+          import androidx.activity.compose.BackHandler
           import androidx.activity.compose.rememberLauncherForActivityResult
           import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.result.IntentSenderRequest
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
           import androidx.compose.foundation.clickable
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.items
           import androidx.compose.foundation.lazy.items
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.Folder
-          import androidx.compose.material.icons.filled.KeyboardArrowDown
-          import androidx.compose.material.icons.filled.KeyboardArrowUp
+          import androidx.compose.material.icons.automirrored.filled.ArrowBack
+          import androidx.compose.material.icons.automirrored.filled.Sort
+          import androidx.compose.material.icons.filled.ArrowDownward
+          import androidx.compose.material.icons.filled.ArrowUpward
+          import androidx.compose.material.icons.filled.Check
+          import androidx.compose.material.icons.filled.DarkMode
+          import androidx.compose.material.icons.filled.MoreVert
           import androidx.compose.material.icons.filled.PlayArrow
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
@@ -123,13 +142,14 @@ jobs:
           import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.dp
-          import android.os.Bundle
-          import android.net.Uri
           import androidx.core.content.ContextCompat
-          import android.content.pm.PackageManager
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.withContext
+          import java.text.SimpleDateFormat
+          import java.util.Date
           import java.util.Locale
+
+          // ---------- Ma'lumot modellari ----------
 
           data class VideoItem(
               val id: Long,
@@ -137,13 +157,120 @@ jobs:
               val name: String,
               val durationMs: Long,
               val sizeBytes: Long,
-              val folder: String
+              val folder: String,
+              val dateAdded: Long,
+              val dateModified: Long
           )
+
+          data class FolderItem(val name: String, val videos: List<VideoItem>) {
+              val cover: VideoItem get() = videos.maxByOrNull { it.dateAdded }!!
+              val latestAdded: Long get() = videos.maxOf { it.dateAdded }
+              val totalSize: Long get() = videos.sumOf { it.sizeBytes }
+          }
+
+          enum class SortField(val label: String) {
+              NAME("Nomi"),
+              DATE_ADDED("Qo'shilgan sana"),
+              DATE_MODIFIED("O'zgartirilgan sana"),
+              DURATION("Davomiyligi"),
+              SIZE("Hajmi"),
+              COUNT("Videolar soni")
+          }
+
+          val VIDEO_SORTS = listOf(
+              SortField.NAME, SortField.DATE_ADDED, SortField.DATE_MODIFIED,
+              SortField.DURATION, SortField.SIZE
+          )
+          val FOLDER_SORTS = listOf(
+              SortField.NAME, SortField.DATE_ADDED, SortField.COUNT, SortField.SIZE
+          )
+
+          data class SortSpec(val field: SortField, val asc: Boolean)
+
+          // ---------- Saralash ----------
+
+          private val natRegex = Regex("(\\d+)|(\\D+)")
+
+          fun naturalCompare(a: String, b: String): Int {
+              val pa = natRegex.findAll(a.lowercase()).map { it.value }.toList()
+              val pb = natRegex.findAll(b.lowercase()).map { it.value }.toList()
+              for (i in 0 until minOf(pa.size, pb.size)) {
+                  val x = pa[i]
+                  val y = pb[i]
+                  val c = if (x[0].isDigit() && y[0].isDigit()) {
+                      val lx = x.trimStart('0')
+                      val ly = y.trimStart('0')
+                      if (lx.length != ly.length) lx.length.compareTo(ly.length) else lx.compareTo(ly)
+                  } else x.compareTo(y)
+                  if (c != 0) return c
+              }
+              return pa.size.compareTo(pb.size)
+          }
+
+          fun sortVideos(list: List<VideoItem>, s: SortSpec): List<VideoItem> {
+              val c: Comparator<VideoItem> = when (s.field) {
+                  SortField.NAME -> Comparator { a, b -> naturalCompare(a.name, b.name) }
+                  SortField.DATE_ADDED -> compareBy<VideoItem> { it.dateAdded }
+                  SortField.DATE_MODIFIED -> compareBy<VideoItem> { it.dateModified }
+                  SortField.DURATION -> compareBy<VideoItem> { it.durationMs }
+                  else -> compareBy<VideoItem> { it.sizeBytes }
+              }
+              return list.sortedWith(if (s.asc) c else c.reversed())
+          }
+
+          fun buildFolders(list: List<VideoItem>, s: SortSpec): List<FolderItem> {
+              val folders = list.groupBy { it.folder }.map { (n, v) -> FolderItem(n, v) }
+              val c: Comparator<FolderItem> = when (s.field) {
+                  SortField.NAME -> Comparator { a, b -> naturalCompare(a.name, b.name) }
+                  SortField.DATE_ADDED -> compareBy<FolderItem> { it.latestAdded }
+                  SortField.COUNT -> compareBy<FolderItem> { it.videos.size }
+                  else -> compareBy<FolderItem> { it.totalSize }
+              }
+              return folders.sortedWith(if (s.asc) c else c.reversed())
+          }
+
+          // ---------- Activity va mavzu ----------
 
           class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  setContent { MaterialTheme { App() } }
+                  setContent { Root() }
+              }
+          }
+
+          @Composable
+          fun Root() {
+              val ctx = LocalContext.current
+              val sp = remember { ctx.getSharedPreferences("prefs", Context.MODE_PRIVATE) }
+              var themeMode by remember { mutableIntStateOf(sp.getInt("theme", 0)) }
+              val dark = when (themeMode) {
+                  1 -> false
+                  2 -> true
+                  else -> isSystemInDarkTheme()
+              }
+
+              val activity = ctx as ComponentActivity
+              DisposableEffect(dark) {
+                  val transparent = android.graphics.Color.TRANSPARENT
+                  val style = if (dark) SystemBarStyle.dark(transparent)
+                  else SystemBarStyle.light(transparent, transparent)
+                  activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                  onDispose { }
+              }
+
+              MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+                  Surface(Modifier.fillMaxSize()) {
+                      PermissionGate {
+                          Library(
+                              sp = sp,
+                              themeMode = themeMode,
+                              onTheme = {
+                                  themeMode = it
+                                  sp.edit().putInt("theme", it).apply()
+                              }
+                          )
+                      }
+                  }
               }
           }
 
@@ -151,9 +278,8 @@ jobs:
               if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
               else Manifest.permission.READ_EXTERNAL_STORAGE
 
-          @OptIn(ExperimentalMaterial3Api::class)
           @Composable
-          fun App() {
+          fun PermissionGate(content: @Composable () -> Unit) {
               val ctx = LocalContext.current
               var granted by remember {
                   mutableStateOf(
@@ -164,101 +290,307 @@ jobs:
               val launcher = rememberLauncherForActivityResult(
                   ActivityResultContracts.RequestPermission()
               ) { granted = it }
-
               LaunchedEffect(Unit) { if (!granted) launcher.launch(videoPermission()) }
 
-              Scaffold(topBar = { TopAppBar(title = { Text("Video Kutubxona") }) }) { pad ->
-                  Box(Modifier.padding(pad).fillMaxSize()) {
-                      if (!granted) {
-                          Column(
-                              Modifier.align(Alignment.Center).padding(24.dp),
-                              horizontalAlignment = Alignment.CenterHorizontally
-                          ) {
-                              Text("Videolarni ko'rsatish uchun ruxsat kerak.")
-                              Spacer(Modifier.height(12.dp))
-                              Button(onClick = { launcher.launch(videoPermission()) }) {
-                                  Text("Ruxsat berish")
+              if (granted) {
+                  content()
+              } else {
+                  Box(Modifier.fillMaxSize().systemBarsPadding(), Alignment.Center) {
+                      Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+                          Text("Videolarni ko'rsatish uchun ruxsat kerak.")
+                          Spacer(Modifier.height(12.dp))
+                          Button(onClick = { launcher.launch(videoPermission()) }) { Text("Ruxsat berish") }
+                      }
+                  }
+              }
+          }
+
+          // ---------- Asosiy ekran ----------
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun Library(sp: SharedPreferences, themeMode: Int, onTheme: (Int) -> Unit) {
+              val ctx = LocalContext.current
+
+              var reload by remember { mutableIntStateOf(0) }
+              var videos by remember { mutableStateOf<List<VideoItem>?>(null) }
+              LaunchedEffect(reload) { videos = withContext(Dispatchers.IO) { loadVideos(ctx) } }
+
+              var tab by rememberSaveable { mutableIntStateOf(1) }
+              var openFolder by rememberSaveable { mutableStateOf<String?>(null) }
+
+              var videoSort by remember {
+                  mutableStateOf(
+                      SortSpec(
+                          SortField.valueOf(sp.getString("v_field", SortField.DATE_ADDED.name)!!),
+                          sp.getBoolean("v_asc", false)
+                      )
+                  )
+              }
+              var folderSort by remember {
+                  mutableStateOf(
+                      SortSpec(
+                          SortField.valueOf(sp.getString("f_field", SortField.NAME.name)!!),
+                          sp.getBoolean("f_asc", true)
+                      )
+                  )
+              }
+
+              var sortMenu by remember { mutableStateOf(false) }
+              var themeMenu by remember { mutableStateOf(false) }
+              var renameTarget by remember { mutableStateOf<VideoItem?>(null) }
+              var pending by remember { mutableStateOf<Pair<VideoItem, String>?>(null) }
+
+              BackHandler(enabled = openFolder != null) { openFolder = null }
+
+              val writeLauncher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.StartIntentSenderForResult()
+              ) { res ->
+                  val p = pending
+                  pending = null
+                  if (res.resultCode == Activity.RESULT_OK && p != null) {
+                      try {
+                          val cv = ContentValues().apply {
+                              put(MediaStore.Video.Media.DISPLAY_NAME, p.second)
+                          }
+                          ctx.contentResolver.update(p.first.uri, cv, null, null)
+                          reload++
+                      } catch (e: Exception) {
+                          Toast.makeText(ctx, "Nomini o'zgartirib bo'lmadi", Toast.LENGTH_LONG).show()
+                      }
+                  }
+              }
+
+              fun startRename(v: VideoItem, newName: String) {
+                  pending = v to newName
+                  try {
+                      val pi = MediaStore.createWriteRequest(ctx.contentResolver, listOf(v.uri))
+                      writeLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                  } catch (e: Exception) {
+                      pending = null
+                      Toast.makeText(ctx, "Nomini o'zgartirib bo'lmadi", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              val folderContext = openFolder == null && tab == 1
+              val curSort = if (folderContext) folderSort else videoSort
+              val sortFields = if (folderContext) FOLDER_SORTS else VIDEO_SORTS
+              fun setSort(s: SortSpec) {
+                  if (folderContext) {
+                      folderSort = s
+                      sp.edit().putString("f_field", s.field.name).putBoolean("f_asc", s.asc).apply()
+                  } else {
+                      videoSort = s
+                      sp.edit().putString("v_field", s.field.name).putBoolean("v_asc", s.asc).apply()
+                  }
+              }
+
+              Scaffold(
+                  topBar = {
+                      Column {
+                          TopAppBar(
+                              title = {
+                                  Text(
+                                      openFolder ?: "Video Kutubxona",
+                                      maxLines = 1,
+                                      overflow = TextOverflow.Ellipsis
+                                  )
+                              },
+                              navigationIcon = {
+                                  if (openFolder != null) {
+                                      IconButton(onClick = { openFolder = null }) {
+                                          Icon(Icons.AutoMirrored.Filled.ArrowBack, "Orqaga")
+                                      }
+                                  }
+                              },
+                              actions = {
+                                  Box {
+                                      IconButton(onClick = { sortMenu = true }) {
+                                          Icon(Icons.AutoMirrored.Filled.Sort, "Saralash")
+                                      }
+                                      DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                                          sortFields.forEach { f ->
+                                              DropdownMenuItem(
+                                                  text = { Text(f.label) },
+                                                  onClick = { setSort(curSort.copy(field = f)); sortMenu = false },
+                                                  trailingIcon = {
+                                                      if (curSort.field == f) Icon(Icons.Filled.Check, null)
+                                                  }
+                                              )
+                                          }
+                                          HorizontalDivider()
+                                          DropdownMenuItem(
+                                              text = { Text("Ortib borish") },
+                                              leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) },
+                                              onClick = { setSort(curSort.copy(asc = true)); sortMenu = false },
+                                              trailingIcon = { if (curSort.asc) Icon(Icons.Filled.Check, null) }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("Kamayib borish") },
+                                              leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
+                                              onClick = { setSort(curSort.copy(asc = false)); sortMenu = false },
+                                              trailingIcon = { if (!curSort.asc) Icon(Icons.Filled.Check, null) }
+                                          )
+                                      }
+                                  }
+                                  Box {
+                                      IconButton(onClick = { themeMenu = true }) {
+                                          Icon(Icons.Filled.DarkMode, "Mavzu")
+                                      }
+                                      DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }) {
+                                          listOf(0 to "Tizim bo'yicha", 1 to "Yorug' rejim", 2 to "Tungi rejim")
+                                              .forEach { (m, label) ->
+                                                  DropdownMenuItem(
+                                                      text = { Text(label) },
+                                                      onClick = { onTheme(m); themeMenu = false },
+                                                      trailingIcon = {
+                                                          if (themeMode == m) Icon(Icons.Filled.Check, null)
+                                                      }
+                                                  )
+                                              }
+                                      }
+                                  }
+                              }
+                          )
+                          if (openFolder == null) {
+                              TabRow(selectedTabIndex = tab) {
+                                  Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("VIDEOLAR") })
+                                  Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("PAPKALAR") })
                               }
                           }
-                      } else {
-                          VideoList()
                       }
                   }
-              }
-          }
-
-          @Composable
-          fun VideoList() {
-              val ctx = LocalContext.current
-              var videos by remember { mutableStateOf<List<VideoItem>?>(null) }
-              LaunchedEffect(Unit) {
-                  videos = withContext(Dispatchers.IO) { loadVideos(ctx) }
-              }
-
-              val list = videos
-              if (list == null) {
-                  Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
-                  return
-              }
-              if (list.isEmpty()) {
-                  Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Video topilmadi") }
-                  return
-              }
-
-              val groups = remember(list) {
-                  list.groupBy { it.folder }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
-              }
-              var collapsed by remember { mutableStateOf(setOf<String>()) }
-
-              LazyColumn(Modifier.fillMaxSize()) {
-                  groups.forEach { (folder, items) ->
-                      item(key = "h_$folder") {
-                          val isCollapsed = folder in collapsed
-                          Row(
-                              Modifier
-                                  .fillMaxWidth()
-                                  .background(MaterialTheme.colorScheme.surfaceVariant)
-                                  .clickable {
-                                      collapsed = if (isCollapsed) collapsed - folder else collapsed + folder
-                                  }
-                                  .padding(horizontal = 16.dp, vertical = 12.dp),
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Icon(Icons.Filled.Folder, null)
-                              Spacer(Modifier.width(12.dp))
-                              Text(
-                                  folder,
-                                  Modifier.weight(1f),
-                                  style = MaterialTheme.typography.titleMedium,
-                                  maxLines = 1,
-                                  overflow = TextOverflow.Ellipsis
-                              )
-                              Text("${items.size}", style = MaterialTheme.typography.labelLarge)
-                              Icon(
-                                  if (isCollapsed) Icons.Filled.KeyboardArrowDown
-                                  else Icons.Filled.KeyboardArrowUp,
-                                  null
-                              )
+              ) { pad ->
+                  Box(Modifier.padding(pad).fillMaxSize()) {
+                      val all = videos
+                      when {
+                          all == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                              CircularProgressIndicator()
+                          }
+                          all.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                              Text("Video topilmadi")
+                          }
+                          openFolder != null -> {
+                              val items = remember(all, openFolder, videoSort) {
+                                  sortVideos(all.filter { it.folder == openFolder }, videoSort)
+                              }
+                              VideoListView(items, showFolder = false) { renameTarget = it }
+                          }
+                          tab == 0 -> {
+                              val items = remember(all, videoSort) { sortVideos(all, videoSort) }
+                              VideoListView(items, showFolder = true) { renameTarget = it }
+                          }
+                          else -> {
+                              val folders = remember(all, folderSort) { buildFolders(all, folderSort) }
+                              FolderGrid(folders) { openFolder = it }
                           }
                       }
-                      if (folder !in collapsed) {
-                          items(items, key = { it.id }) { VideoRow(it) }
+                  }
+              }
+
+              renameTarget?.let { v ->
+                  val dot = v.name.lastIndexOf('.')
+                  val ext = if (dot > 0) v.name.substring(dot) else ""
+                  val base = if (dot > 0) v.name.substring(0, dot) else v.name
+                  var text by remember(v.id) { mutableStateOf(base) }
+                  AlertDialog(
+                      onDismissRequest = { renameTarget = null },
+                      title = { Text("Nomini o'zgartirish") },
+                      text = {
+                          OutlinedTextField(
+                              value = text,
+                              onValueChange = { text = it },
+                              singleLine = true,
+                              suffix = { Text(ext) }
+                          )
+                      },
+                      confirmButton = {
+                          TextButton(
+                              enabled = text.isNotBlank() && !text.contains('/'),
+                              onClick = {
+                                  val n = text.trim() + ext
+                                  renameTarget = null
+                                  if (n != v.name) startRename(v, n)
+                              }
+                          ) { Text("Saqlash") }
+                      },
+                      dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Bekor qilish") } }
+                  )
+              }
+          }
+
+          // ---------- Papkalar (Samsung Video uslubida) ----------
+
+          @Composable
+          fun FolderGrid(folders: List<FolderItem>, onOpen: (String) -> Unit) {
+              LazyVerticalGrid(
+                  columns = GridCells.Fixed(2),
+                  modifier = Modifier.fillMaxSize(),
+                  contentPadding = PaddingValues(12.dp),
+                  horizontalArrangement = Arrangement.spacedBy(12.dp),
+                  verticalArrangement = Arrangement.spacedBy(16.dp)
+              ) {
+                  items(folders, key = { it.name }) { f ->
+                      Column(Modifier.clickable { onOpen(f.name) }) {
+                          Thumb(
+                              v = f.cover,
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .aspectRatio(1f)
+                                  .clip(RoundedCornerShape(4.dp)),
+                              size = Size(400, 400)
+                          )
+                          Spacer(Modifier.height(6.dp))
+                          Text(
+                              f.name,
+                              style = MaterialTheme.typography.bodyLarge,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                          Text(
+                              "${f.videos.size}",
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
                       }
                   }
               }
           }
 
+          // ---------- Video ro'yxati ----------
+
           @Composable
-          fun VideoRow(v: VideoItem) {
+          fun VideoListView(items: List<VideoItem>, showFolder: Boolean, onRename: (VideoItem) -> Unit) {
+              if (items.isEmpty()) {
+                  Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Video yo'q") }
+                  return
+              }
+              LazyColumn(Modifier.fillMaxSize()) {
+                  items(items, key = { it.id }) { VideoRow(it, showFolder, onRename) }
+              }
+          }
+
+          @Composable
+          fun VideoRow(v: VideoItem, showFolder: Boolean, onRename: (VideoItem) -> Unit) {
               val ctx = LocalContext.current
+              var menu by remember { mutableStateOf(false) }
+              val date = remember(v.dateAdded) {
+                  SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(v.dateAdded * 1000))
+              }
               Row(
                   Modifier
                       .fillMaxWidth()
                       .clickable { play(ctx, v) }
-                      .padding(horizontal = 16.dp, vertical = 8.dp),
+                      .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
-                  Thumb(v)
+                  Thumb(
+                      v,
+                      Modifier
+                          .width(120.dp)
+                          .height(68.dp)
+                          .clip(RoundedCornerShape(8.dp))
+                  )
                   Spacer(Modifier.width(12.dp))
                   Column(Modifier.weight(1f)) {
                       Text(
@@ -273,29 +605,51 @@ jobs:
                           style = MaterialTheme.typography.bodySmall,
                           color = MaterialTheme.colorScheme.onSurfaceVariant
                       )
+                      Text(
+                          if (showFolder) "${v.folder}  •  $date" else date,
+                          style = MaterialTheme.typography.bodySmall,
+                          color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          maxLines = 1,
+                          overflow = TextOverflow.Ellipsis
+                      )
+                  }
+                  Box {
+                      IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Amallar") }
+                      DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                          DropdownMenuItem(
+                              text = { Text("Nomini o'zgartirish") },
+                              onClick = { menu = false; onRename(v) }
+                          )
+                      }
                   }
               }
           }
 
+          // ---------- Eskiz ----------
+
+          object ThumbCache {
+              val cache = LruCache<String, Bitmap>(300)
+          }
+
           @Composable
-          fun Thumb(v: VideoItem) {
+          fun Thumb(v: VideoItem, modifier: Modifier, size: Size = Size(320, 180)) {
               val ctx = LocalContext.current
-              var bmp by remember(v.id) { mutableStateOf<Bitmap?>(null) }
-              LaunchedEffect(v.id) {
-                  bmp = withContext(Dispatchers.IO) {
-                      try {
-                          ctx.contentResolver.loadThumbnail(v.uri, Size(320, 180), null)
-                      } catch (e: Exception) {
-                          null
+              val key = "${v.id}_${size.width}"
+              var bmp by remember(key) { mutableStateOf(ThumbCache.cache.get(key)) }
+              LaunchedEffect(key) {
+                  if (bmp == null) {
+                      bmp = withContext(Dispatchers.IO) {
+                          try {
+                              ctx.contentResolver.loadThumbnail(v.uri, size, null)
+                                  .also { ThumbCache.cache.put(key, it) }
+                          } catch (e: Exception) {
+                              null
+                          }
                       }
                   }
               }
               Box(
-                  Modifier
-                      .width(120.dp)
-                      .height(68.dp)
-                      .clip(RoundedCornerShape(8.dp))
-                      .background(MaterialTheme.colorScheme.surfaceVariant),
+                  modifier.background(MaterialTheme.colorScheme.surfaceVariant),
                   Alignment.Center
               ) {
                   val b = bmp
@@ -311,6 +665,8 @@ jobs:
               }
           }
 
+          // ---------- MediaStore ----------
+
           fun loadVideos(ctx: Context): List<VideoItem> {
               val out = mutableListOf<VideoItem>()
               val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -319,17 +675,18 @@ jobs:
                   MediaStore.Video.Media.DISPLAY_NAME,
                   MediaStore.Video.Media.DURATION,
                   MediaStore.Video.Media.SIZE,
-                  MediaStore.Video.Media.BUCKET_DISPLAY_NAME
+                  MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
+                  MediaStore.Video.Media.DATE_ADDED,
+                  MediaStore.Video.Media.DATE_MODIFIED
               )
-              ctx.contentResolver.query(
-                  collection, proj, null, null,
-                  "${MediaStore.Video.Media.DATE_ADDED} DESC"
-              )?.use { c ->
+              ctx.contentResolver.query(collection, proj, null, null, null)?.use { c ->
                   val iId = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
                   val iName = c.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
                   val iDur = c.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
                   val iSize = c.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
                   val iBucket = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+                  val iAdded = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+                  val iMod = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED)
                   while (c.moveToNext()) {
                       val id = c.getLong(iId)
                       out += VideoItem(
@@ -338,7 +695,9 @@ jobs:
                           name = c.getString(iName) ?: "Nomsiz",
                           durationMs = c.getLong(iDur),
                           sizeBytes = c.getLong(iSize),
-                          folder = c.getString(iBucket) ?: "Boshqa"
+                          folder = c.getString(iBucket) ?: "Boshqa",
+                          dateAdded = c.getLong(iAdded),
+                          dateModified = c.getLong(iMod)
                       )
                   }
               }
@@ -364,6 +723,20 @@ jobs:
               }
               ctx.startActivity(Intent.createChooser(i, "Ijro etish"))
           }
+          EOF_FILE
+          mkdir -p $(dirname 'app/src/main/res/values-night/themes.xml')
+          cat > 'app/src/main/res/values-night/themes.xml' <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.VideoKutubxona" parent="android:Theme.Material.NoActionBar" />
+          </resources>
+          EOF_FILE
+          mkdir -p $(dirname 'app/src/main/res/values/themes.xml')
+          cat > 'app/src/main/res/values/themes.xml' <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.VideoKutubxona" parent="android:Theme.Material.Light.NoActionBar" />
+          </resources>
           EOF_FILE
           mkdir -p $(dirname 'build.gradle.kts')
           cat > 'build.gradle.kts' <<'EOF_FILE'
