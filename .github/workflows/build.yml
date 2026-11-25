@@ -33,8 +33,8 @@ jobs:
                   applicationId = "uz.videokutubxona"
                   minSdk = 30
                   targetSdk = 35
-                  versionCode = 4
-                  versionName = "4.0"
+                  versionCode = 5
+                  versionName = "5.0"
               }
               buildTypes {
                   release {
@@ -712,7 +712,7 @@ jobs:
                               RadioRow("Tizim tanlovi (\"Doim\" ni bosib doimiy qilish mumkin)", playerMode == 1) {
                                   playerMode = 1; sp.edit().putInt("player", 1).apply()
                               }
-                              RadioRow("Samsung Video Player", playerMode == 2) {
+                              RadioRow("Samsung Video Player (to'g'ridan-to'g'ri ochish)", playerMode == 2) {
                                   playerMode = 2; sp.edit().putInt("player", 2).apply()
                               }
 
@@ -1172,7 +1172,7 @@ jobs:
           }
 
           fun playExternal(ctx: Context, v: VideoItem, samsung: Boolean) {
-              val i = Intent(Intent.ACTION_VIEW).apply {
+              fun base() = Intent(Intent.ACTION_VIEW).apply {
                   setDataAndType(v.uri, "video/*")
                   addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
               }
@@ -1186,14 +1186,27 @@ jobs:
                           false
                       }
                   }
-                  if (pkg != null) {
-                      i.setPackage(pkg)
-                  } else {
+                  if (pkg == null) {
                       Toast.makeText(ctx, "Samsung Video Player topilmadi", Toast.LENGTH_LONG).show()
+                  } else {
+                      if (pkg == "com.samsung.android.video") {
+                          try {
+                              ctx.startActivity(
+                                  base().setClassName(pkg, "com.samsung.android.video.player.activity.MoviePlayer")
+                              )
+                              return
+                          } catch (e: Exception) {
+                          }
+                      }
+                      try {
+                          ctx.startActivity(base().setPackage(pkg))
+                          return
+                      } catch (e: Exception) {
+                      }
                   }
               }
               try {
-                  ctx.startActivity(i)
+                  ctx.startActivity(base())
               } catch (e: Exception) {
                   Toast.makeText(ctx, "Pleyer topilmadi", Toast.LENGTH_LONG).show()
               }
@@ -1212,33 +1225,50 @@ jobs:
           cat > 'app/src/main/java/uz/videokutubxona/PlayerActivity.kt' <<'EOF_FILE'
           package uz.videokutubxona
 
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
           import android.content.SharedPreferences
+          import android.content.pm.ActivityInfo
+          import android.content.res.Configuration
+          import android.media.AudioManager
           import android.net.Uri
           import android.os.Bundle
           import android.provider.OpenableColumns
-          import android.view.View
+          import android.provider.Settings
           import android.view.WindowManager
           import androidx.activity.ComponentActivity
           import androidx.activity.compose.setContent
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.background
-          import androidx.compose.foundation.layout.Box
-          import androidx.compose.foundation.layout.displayCutoutPadding
-          import androidx.compose.foundation.layout.fillMaxSize
-          import androidx.compose.foundation.layout.fillMaxWidth
-          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.gestures.detectVerticalDragGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.AspectRatio
+          import androidx.compose.material.icons.filled.Lock
+          import androidx.compose.material.icons.filled.MoreVert
+          import androidx.compose.material.icons.filled.Pause
+          import androidx.compose.material.icons.filled.PlayArrow
+          import androidx.compose.material.icons.filled.ScreenRotation
+          import androidx.compose.material.icons.filled.SkipNext
+          import androidx.compose.material.icons.filled.SkipPrevious
+          import androidx.compose.material.icons.filled.Speed
           import androidx.compose.material.icons.filled.Subtitles
-          import androidx.compose.material3.Icon
-          import androidx.compose.material3.IconButton
-          import androidx.compose.material3.Text
-          import androidx.compose.runtime.getValue
-          import androidx.compose.runtime.mutableStateOf
-          import androidx.compose.runtime.setValue
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.alpha
+          import androidx.compose.ui.draw.clip
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.input.pointer.pointerInput
           import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.viewinterop.AndroidView
           import androidx.core.view.WindowCompat
@@ -1250,6 +1280,8 @@ jobs:
           import androidx.media3.common.Player
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.ui.PlayerView
+          import kotlinx.coroutines.delay
+          import kotlin.math.roundToInt
 
           /** Hozir ko'rinib turgan ro'yxat (papka yoki barcha videolar) shu yerga qo'yiladi. */
           object PlayQueue {
@@ -1261,8 +1293,6 @@ jobs:
 
           class PlayerActivity : ComponentActivity() {
               private var exoPlayer: ExoPlayer? = null
-              private var title by mutableStateOf("")
-              private var showControls by mutableStateOf(true)
               private lateinit var sp: SharedPreferences
 
               private val subtitlePicker =
@@ -1299,11 +1329,13 @@ jobs:
                   val startId = PlayQueue.ids.getOrNull(start)
                   val saved = if (startId != null) sp.getLong("pos_$startId", 0L) else 0L
                   exo.setMediaItems(items, start, saved)
-                  exo.addListener(object : Player.Listener {
-                      override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                          title = mediaItem?.mediaMetadata?.title?.toString() ?: ""
-                      }
 
+                  val autoplay = sp.getBoolean("autoplay", true)
+                  val repeat = sp.getBoolean("repeat", false)
+                  exo.setPauseAtEndOfMediaItems(!autoplay)
+                  exo.repeatMode = if (repeat && autoplay) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
+
+                  exo.addListener(object : Player.Listener {
                       override fun onPositionDiscontinuity(
                           oldPosition: Player.PositionInfo,
                           newPosition: Player.PositionInfo,
@@ -1314,50 +1346,38 @@ jobs:
                           }
                       }
                   })
-                  title = names.getOrElse(start) { "" }
                   exo.prepare()
                   exo.playWhenReady = true
                   exoPlayer = exo
 
                   setContent {
-                      Box(Modifier.fillMaxSize().background(Color.Black)) {
-                          AndroidView(
-                              modifier = Modifier.fillMaxSize(),
-                              factory = { ctx ->
-                                  PlayerView(ctx).apply {
-                                      player = exo
-                                      setControllerVisibilityListener(
-                                          PlayerView.ControllerVisibilityListener { v ->
-                                              showControls = v == View.VISIBLE
-                                          }
-                                      )
-                                  }
-                              }
-                          )
-                          if (showControls) {
-                              Text(
-                                  title,
-                                  color = Color.White,
-                                  maxLines = 1,
-                                  overflow = TextOverflow.Ellipsis,
-                                  modifier = Modifier
-                                      .align(Alignment.TopStart)
-                                      .displayCutoutPadding()
-                                      .fillMaxWidth(0.75f)
-                                      .padding(16.dp)
-                              )
-                              IconButton(
-                                  onClick = { subtitlePicker.launch(arrayOf("*/*")) },
-                                  modifier = Modifier
-                                      .align(Alignment.TopEnd)
-                                      .displayCutoutPadding()
-                                      .padding(8.dp)
-                              ) {
-                                  Icon(Icons.Filled.Subtitles, "Subtitr qo'shish", tint = Color.White)
-                              }
-                          }
+                      MaterialTheme(colorScheme = darkColorScheme()) {
+                          PlayerScreen(this, exo, sp)
                       }
                   }
+              }
+
+              fun pickSubtitle() {
+                  subtitlePicker.launch(arrayOf("*/*"))
+              }
+
+              fun shareCurrent() {
+                  val uri = exoPlayer?.currentMediaItem?.localConfiguration?.uri ?: return
+                  val i = Intent(Intent.ACTION_SEND).apply {
+                      type = "video/*"
+                      putExtra(Intent.EXTRA_STREAM, uri)
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  startActivity(Intent.createChooser(i, "Ulashish"))
+              }
+
+              fun toggleOrientation() {
+                  requestedOrientation =
+                      if (requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
+                          if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+                              ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                          else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                      } else ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
               }
 
               private fun store(index: Int, posMs: Long) {
@@ -1413,6 +1433,417 @@ jobs:
                   exoPlayer?.release()
                   exoPlayer = null
                   super.onDestroy()
+              }
+          }
+
+          // ---------- Samsung uslubidagi pleyer ekrani ----------
+
+          private val RESIZE_MODES = intArrayOf(0, 3, 4) // moslash, to'ldirish, kattalashtirish
+          private val RESIZE_NAMES = listOf("Ekranga moslash", "Ekranni to'ldirish", "Kattalashtirish")
+          private val SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+          private val PILL = Color(0xCC1E1E1E)
+
+          private fun initialBrightness(a: Activity): Float {
+              val b = a.window.attributes.screenBrightness
+              if (b >= 0f) return b
+              return try {
+                  Settings.System.getInt(a.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
+              } catch (e: Exception) {
+                  0.5f
+              }
+          }
+
+          @Composable
+          fun RoundBtn(icon: ImageVector, size: Dp, enabled: Boolean = true, onClick: () -> Unit) {
+              Box(
+                  Modifier
+                      .size(size)
+                      .clip(CircleShape)
+                      .background(Color(0x66000000))
+                      .clickable(enabled = enabled) { onClick() }
+                      .alpha(if (enabled) 1f else 0.35f),
+                  Alignment.Center
+              ) {
+                  Icon(icon, null, tint = Color.White, modifier = Modifier.size(size * 0.5f))
+              }
+          }
+
+          @Composable
+          fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+              Row(
+                  Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                  Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+              }
+          }
+
+          @Composable
+          fun PlayerScreen(activity: PlayerActivity, exo: ExoPlayer, sp: SharedPreferences) {
+              var isPlaying by remember { mutableStateOf(exo.isPlaying) }
+              var title by remember {
+                  mutableStateOf(PlayQueue.names.getOrNull(exo.currentMediaItemIndex) ?: "")
+              }
+              var hasPrev by remember { mutableStateOf(exo.hasPreviousMediaItem()) }
+              var hasNext by remember { mutableStateOf(exo.hasNextMediaItem()) }
+              var duration by remember { mutableLongStateOf(0L) }
+              var position by remember { mutableLongStateOf(0L) }
+              var seeking by remember { mutableStateOf<Float?>(null) }
+
+              var controlsVisible by remember { mutableStateOf(true) }
+              var touchTick by remember { mutableIntStateOf(0) }
+              var locked by remember { mutableStateOf(false) }
+              var resizeIdx by remember { mutableIntStateOf(0) }
+              var speed by remember { mutableFloatStateOf(1f) }
+
+              var menuOpen by remember { mutableStateOf(false) }
+              var speedDialog by remember { mutableStateOf(false) }
+              var settingsDialog by remember { mutableStateOf(false) }
+              var detailsDialog by remember { mutableStateOf(false) }
+
+              var autoplay by remember { mutableStateOf(sp.getBoolean("autoplay", true)) }
+              var repeat by remember { mutableStateOf(sp.getBoolean("repeat", false)) }
+
+              var hud by remember { mutableStateOf<String?>(null) }
+              var hudTick by remember { mutableIntStateOf(0) }
+              fun showHud(s: String) {
+                  hud = s
+                  hudTick++
+              }
+
+              val audio = remember { activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+              val maxVol = remember { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
+              var volF by remember { mutableFloatStateOf(audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+              var brightness by remember { mutableFloatStateOf(initialBrightness(activity)) }
+
+              DisposableEffect(exo) {
+                  val l = object : Player.Listener {
+                      override fun onEvents(player: Player, events: Player.Events) {
+                          isPlaying = player.isPlaying
+                          title = PlayQueue.names.getOrNull(player.currentMediaItemIndex) ?: ""
+                          hasPrev = player.hasPreviousMediaItem()
+                          hasNext = player.hasNextMediaItem()
+                          if (player.duration > 0) duration = player.duration
+                      }
+                  }
+                  exo.addListener(l)
+                  onDispose { exo.removeListener(l) }
+              }
+
+              LaunchedEffect(exo) {
+                  while (true) {
+                      position = exo.currentPosition
+                      if (exo.duration > 0) duration = exo.duration
+                      delay(300)
+                  }
+              }
+
+              LaunchedEffect(controlsVisible, isPlaying, touchTick) {
+                  if (controlsVisible && isPlaying) {
+                      delay(4000)
+                      controlsVisible = false
+                  }
+              }
+
+              LaunchedEffect(hudTick) {
+                  if (hudTick > 0) {
+                      delay(900)
+                      hud = null
+                  }
+              }
+
+              fun togglePlay() {
+                  if (exo.playbackState == Player.STATE_ENDED) exo.seekTo(0)
+                  if (exo.isPlaying) exo.pause() else exo.play()
+              }
+
+              fun applyModes() {
+                  exo.setPauseAtEndOfMediaItems(!autoplay)
+                  exo.repeatMode = if (repeat && autoplay) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
+              }
+
+              Box(Modifier.fillMaxSize().background(Color.Black)) {
+                  AndroidView(
+                      modifier = Modifier.fillMaxSize(),
+                      factory = { ctx ->
+                          PlayerView(ctx).apply {
+                              player = exo
+                              useController = false
+                          }
+                      },
+                      update = { it.resizeMode = RESIZE_MODES[resizeIdx] }
+                  )
+
+                  if (controlsVisible && !locked) {
+                      Box(Modifier.fillMaxSize().background(Color(0x66000000)))
+                  }
+
+                  // Ishoralar qatlami: bir marta bosish, ikki marta bosish, yorqinlik/ovoz
+                  Box(
+                      Modifier
+                          .fillMaxSize()
+                          .pointerInput(locked) {
+                              detectTapGestures(
+                                  onTap = {
+                                      controlsVisible = !controlsVisible
+                                      touchTick++
+                                  },
+                                  onDoubleTap = { off ->
+                                      if (!locked) {
+                                          val w = size.width
+                                          if (off.x < w / 3f) {
+                                              exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0L))
+                                              showHud("-10 s")
+                                          } else if (off.x > w * 2f / 3f) {
+                                              val t = exo.currentPosition + 10_000
+                                              exo.seekTo(if (duration > 0) t.coerceAtMost(duration) else t)
+                                              showHud("+10 s")
+                                          } else {
+                                              togglePlay()
+                                          }
+                                      }
+                                  }
+                              )
+                          }
+                          .pointerInput(locked) {
+                              var left = true
+                              detectVerticalDragGestures(
+                                  onDragStart = { off -> left = off.x < size.width / 2f },
+                                  onVerticalDrag = { change, dy ->
+                                      if (!locked) {
+                                          change.consume()
+                                          val d = -dy / (size.height * 0.6f)
+                                          if (left) {
+                                              brightness = (brightness + d).coerceIn(0.02f, 1f)
+                                              val lp = activity.window.attributes
+                                              lp.screenBrightness = brightness
+                                              activity.window.attributes = lp
+                                              showHud("Yorqinlik ${(brightness * 100).roundToInt()}%")
+                                          } else {
+                                              volF = (volF + d * maxVol).coerceIn(0f, maxVol.toFloat())
+                                              audio.setStreamVolume(AudioManager.STREAM_MUSIC, volF.roundToInt(), 0)
+                                              showHud("Ovoz ${volF.roundToInt()}/$maxVol")
+                                          }
+                                      }
+                                  }
+                              )
+                          }
+                  )
+
+                  if (controlsVisible && !locked) {
+                      Box(
+                          Modifier
+                              .fillMaxSize()
+                              .displayCutoutPadding()
+                              .padding(horizontal = 16.dp, vertical = 12.dp)
+                      ) {
+                          // Tepa: nom va menyu
+                          Text(
+                              title,
+                              color = Color.White,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier
+                                  .align(Alignment.TopStart)
+                                  .fillMaxWidth(0.55f)
+                                  .padding(top = 16.dp)
+                          )
+                          Row(
+                              Modifier
+                                  .align(Alignment.TopEnd)
+                                  .clip(RoundedCornerShape(28.dp))
+                                  .background(PILL),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              IconButton(onClick = { touchTick++; activity.pickSubtitle() }) {
+                                  Icon(Icons.Filled.Subtitles, "Subtitr", tint = Color.White)
+                              }
+                              Box {
+                                  IconButton(onClick = { menuOpen = true; touchTick++ }) {
+                                      Icon(Icons.Filled.MoreVert, "Menyu", tint = Color.White)
+                                  }
+                                  DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                      DropdownMenuItem(
+                                          text = { Text("Ulashish") },
+                                          onClick = { menuOpen = false; activity.shareCurrent() }
+                                      )
+                                      DropdownMenuItem(
+                                          text = { Text("Tafsilotlar") },
+                                          onClick = { menuOpen = false; detailsDialog = true }
+                                      )
+                                      DropdownMenuItem(
+                                          text = { Text("Parametrlar") },
+                                          onClick = { menuOpen = false; settingsDialog = true }
+                                      )
+                                  }
+                              }
+                          }
+
+                          // Markaz: oldingi / ijro / keyingi
+                          Row(
+                              Modifier.align(Alignment.Center),
+                              horizontalArrangement = Arrangement.spacedBy(36.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              RoundBtn(Icons.Filled.SkipPrevious, 52.dp, hasPrev) {
+                                  touchTick++
+                                  exo.seekToPreviousMediaItem()
+                              }
+                              RoundBtn(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, 72.dp) {
+                                  touchTick++
+                                  togglePlay()
+                              }
+                              RoundBtn(Icons.Filled.SkipNext, 52.dp, hasNext) {
+                                  touchTick++
+                                  exo.seekToNextMediaItem()
+                              }
+                          }
+
+                          // Pastki qism: vaqt, surgich, tugmalar
+                          Column(
+                              Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              val frac = if (duration > 0)
+                                  (seeking ?: (position.toFloat() / duration)).coerceIn(0f, 1f)
+                              else 0f
+                              val shownPos = if (seeking != null) (frac * duration).toLong() else position
+                              Row(
+                                  Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                  horizontalArrangement = Arrangement.SpaceBetween
+                              ) {
+                                  Text(formatDuration(shownPos), color = Color.White, style = MaterialTheme.typography.bodySmall)
+                                  Text(formatDuration(duration), color = Color.White, style = MaterialTheme.typography.bodySmall)
+                              }
+                              Slider(
+                                  value = frac,
+                                  onValueChange = { seeking = it; touchTick++ },
+                                  onValueChangeFinished = {
+                                      seeking?.let { f -> if (duration > 0) exo.seekTo((f * duration).toLong()) }
+                                      seeking = null
+                                  },
+                                  colors = SliderDefaults.colors(
+                                      thumbColor = Color.White,
+                                      activeTrackColor = Color.White,
+                                      inactiveTrackColor = Color(0x55FFFFFF)
+                                  )
+                              )
+                              Row(
+                                  Modifier
+                                      .clip(RoundedCornerShape(28.dp))
+                                      .background(PILL)
+                                      .padding(horizontal = 8.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  IconButton(onClick = {
+                                      touchTick++
+                                      resizeIdx = (resizeIdx + 1) % RESIZE_MODES.size
+                                      showHud(RESIZE_NAMES[resizeIdx])
+                                  }) { Icon(Icons.Filled.AspectRatio, "O'lcham", tint = Color.White) }
+                                  IconButton(onClick = { touchTick++; speedDialog = true }) {
+                                      Icon(Icons.Filled.Speed, "Tezlik", tint = Color.White)
+                                  }
+                                  IconButton(onClick = { touchTick++; activity.toggleOrientation() }) {
+                                      Icon(Icons.Filled.ScreenRotation, "Aylantirish", tint = Color.White)
+                                  }
+                                  IconButton(onClick = { locked = true; controlsVisible = false }) {
+                                      Icon(Icons.Filled.Lock, "Qulflash", tint = Color.White)
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // Qulflangan holat: faqat qulfni ochish tugmasi
+                  if (locked && controlsVisible) {
+                      Box(Modifier.fillMaxSize().displayCutoutPadding().padding(24.dp)) {
+                          RoundBtn(Icons.Filled.Lock, 56.dp) { locked = false; touchTick++ }
+                              .also { }
+                      }
+                  }
+
+                  hud?.let {
+                      Text(
+                          it,
+                          color = Color.White,
+                          modifier = Modifier
+                              .align(Alignment.TopCenter)
+                              .padding(top = 72.dp)
+                              .clip(RoundedCornerShape(20.dp))
+                              .background(Color(0xAA000000))
+                              .padding(horizontal = 16.dp, vertical = 8.dp)
+                      )
+                  }
+              }
+
+              if (speedDialog) {
+                  AlertDialog(
+                      onDismissRequest = { speedDialog = false },
+                      title = { Text("Ijro tezligi") },
+                      text = {
+                          Column {
+                              SPEEDS.forEach { s ->
+                                  Row(
+                                      Modifier
+                                          .fillMaxWidth()
+                                          .clickable {
+                                              speed = s
+                                              exo.setPlaybackSpeed(s)
+                                              speedDialog = false
+                                              showHud("${s}x")
+                                          }
+                                          .padding(vertical = 8.dp),
+                                      verticalAlignment = Alignment.CenterVertically
+                                  ) {
+                                      RadioButton(selected = speed == s, onClick = null)
+                                      Spacer(Modifier.width(10.dp))
+                                      Text("${s}x")
+                                  }
+                              }
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { speedDialog = false }) { Text("Yopish") } }
+                  )
+              }
+
+              if (settingsDialog) {
+                  AlertDialog(
+                      onDismissRequest = { settingsDialog = false },
+                      title = { Text("Video pleyer parametrlari") },
+                      text = {
+                          Column {
+                              SwitchRow("Keyingi videoni avto-qo'yish", autoplay) {
+                                  autoplay = it
+                                  sp.edit().putBoolean("autoplay", it).apply()
+                                  applyModes()
+                              }
+                              SwitchRow("Videolarni avtomatik takrorlash", repeat, enabled = autoplay) {
+                                  repeat = it
+                                  sp.edit().putBoolean("repeat", it).apply()
+                                  applyModes()
+                              }
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { settingsDialog = false }) { Text("Yopish") } }
+                  )
+              }
+
+              if (detailsDialog) {
+                  val vs = exo.videoSize
+                  AlertDialog(
+                      onDismissRequest = { detailsDialog = false },
+                      title = { Text("Tafsilotlar") },
+                      text = {
+                          Column {
+                              InfoLine("Nomi", title)
+                              InfoLine("Davomiyligi", formatDuration(duration))
+                              if (vs.width > 0 && vs.height > 0) InfoLine("O'lchami", "${vs.width} × ${vs.height}")
+                              InfoLine("Manzil", exo.currentMediaItem?.localConfiguration?.uri?.toString() ?: "")
+                          }
+                      },
+                      confirmButton = { TextButton(onClick = { detailsDialog = false }) { Text("Yopish") } }
+                  )
               }
           }
           EOF_FILE
