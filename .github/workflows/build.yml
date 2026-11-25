@@ -33,13 +33,24 @@ jobs:
                   applicationId = "uz.videokutubxona"
                   minSdk = 30
                   targetSdk = 35
-                  versionCode = 5
-                  versionName = "5.0"
+                  versionCode = 6
+                  versionName = "5.1"
+              }
+              signingConfigs {
+                  create("fixed") {
+                      storeFile = file("fixed.keystore")
+                      storePassword = "android"
+                      keyAlias = "key"
+                      keyPassword = "android"
+                  }
               }
               buildTypes {
+                  debug {
+                      signingConfig = signingConfigs.getByName("fixed")
+                  }
                   release {
                       isMinifyEnabled = false
-                      signingConfig = signingConfigs.getByName("debug")
+                      signingConfig = signingConfigs.getByName("fixed")
                   }
               }
               compileOptions {
@@ -60,6 +71,56 @@ jobs:
               implementation("androidx.media3:media3-exoplayer:1.4.1")
               implementation("androidx.media3:media3-ui:1.4.1")
           }
+          EOF_FILE
+          mkdir -p $(dirname 'app/fixed.keystore')
+          base64 -d > 'app/fixed.keystore' <<'EOF_FILE'
+          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
+          AgInEA==
           EOF_FILE
           mkdir -p $(dirname 'app/src/main/AndroidManifest.xml')
           cat > 'app/src/main/AndroidManifest.xml' <<'EOF_FILE'
